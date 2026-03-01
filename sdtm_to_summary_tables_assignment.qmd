@@ -1,0 +1,830 @@
+---
+title: STATISTICAL ANALYSIS PLAN
+format:
+  docx:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+number-sections: true
+execute:
+    echo: false
+    warning: false
+    message: false
+---
+
+```{r library_download}
+#Загрузка библиотек
+
+library(haven)
+library(reporter)
+library(tidyverse)
+library(stringr)
+```
+
+```{r files_read}
+files = list()
+for (file in list.files("data")) {
+  key <- str_replace(file, ".xpt", "")
+  files[[key]] <- read_xpt(file.path("data", file))
+}
+
+list2env(files, envir = .GlobalEnv)
+```
+
+# Создание таблицы со статусами пациентов в исследовании 
+
+```{r disposition_table_df_preparation}
+count_screened <- DM %>%
+  summarise(
+    Category = "Screened",
+    SD2 = sum(!is.na(USUBJID)))  %>%  #Вместо SD2 должна быть выбрана переменная, содержащая информацию о препарате, из колонки ACTARMCD
+  mutate(across(everything(), as.character))
+
+count_screen_failure <- DS %>%
+  summarise(
+    Category = "Screening failure",
+    SD2 = sum(DSDECOD == "SCREEN FAILURE")) %>% #Вместо SD2 должна быть выбрана переменная, содержащая информацию о препарате, из колонки ACTARMCD
+  mutate(across(everything(), as.character))
+
+randomised_patients <- DM %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "Randomised patients",
+    n_rand = n())
+
+randomised_patients_wider <- DM %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "Randomised patients",
+    n_rand = n()
+  ) %>%
+  select(Category, ACTARMCD, n_rand) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = n_rand
+  ) %>%
+  mutate(across(everything(), as.character))
+
+safety_set <- DM %>%
+  select(USUBJID, ACTARMCD) %>%
+  left_join(EX, by = "USUBJID") %>% 
+  filter(EPOCH == "TREATMENT") %>% 
+  distinct(USUBJID, ACTARMCD) %>% 
+  group_by(ACTARMCD) %>%
+  summarise(
+    Safety_category = "Safety set",
+    n_safety = n()
+  ) %>%
+  left_join(randomised_patients, by = "ACTARMCD") %>%
+  mutate(
+      Category = "Safety Set",
+      pct = (n_safety / n_rand) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n_safety, pct)
+  ) %>%
+  select(Category, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)" 
+  ) %>%
+  mutate(across(everything(), as.character))
+
+full_set_screening <- LB %>%
+  filter((EPOCH == "TREATMENT" | EPOCH == "SCREENING") & 
+           VISIT == "Visit 1 (Day 1)" & LBTESTCD == "lab_param_1" & !is.na(LBSTRESN)) %>% 
+  select(USUBJID, EPOCH, VISIT) 
+  
+full_set <- EX %>%
+  filter(EPOCH == "TREATMENT") %>% 
+  select(USUBJID) %>%
+  distinct(USUBJID) %>%
+  inner_join(full_set_screening, by = "USUBJID") %>%
+  inner_join(
+    DM %>% select(USUBJID, ACTARMCD), 
+    by = "USUBJID"
+  ) %>%
+  inner_join(
+    LB %>% filter(LBTESTCD == "lab_param_1" & EPOCH == "FOLLOW-UP") %>%
+      distinct(USUBJID), 
+    by = "USUBJID") %>%  
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "Full Analysis Set",
+    n_full = n()
+  ) %>%
+  left_join(randomised_patients, by = "ACTARMCD") %>%
+  mutate(
+      Category = "Full Analysis Set",
+      pct = (n_full / n_rand) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n_full, pct)
+  ) %>%
+  select(Category, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)" 
+  ) %>%
+  mutate(across(everything(), as.character))
+
+protocol_set <- DS %>% 
+  filter(DSDECOD == "COMPLETED") %>% 
+  select(USUBJID) %>%
+  inner_join(
+    DM %>% select(USUBJID, ACTARMCD), 
+    by = "USUBJID"
+  ) %>%
+  inner_join(DV, by = "USUBJID") %>% 
+  filter(DVCAT == "Minor") %>% 
+  distinct(USUBJID, ACTARMCD) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "Per Protocol Set",
+    n_protocol = n()) %>%
+    left_join(randomised_patients, by = "ACTARMCD"
+  ) %>%
+  mutate(
+      Category = "Per Protocol Set",
+      pct = (n_protocol / n_rand) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n_protocol, pct)
+  ) %>%
+  select(Category, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)" 
+  ) %>%
+  mutate(across(everything(), as.character))
+
+completed_set <- DS %>% 
+  filter(DSDECOD == "COMPLETED") %>% 
+  inner_join(
+    DM %>% select(USUBJID, ACTARMCD), 
+    by = "USUBJID"
+  ) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "Completed the study per protocol",
+    n_completed = n()
+  ) %>%
+  left_join(randomised_patients, by = "ACTARMCD") %>%
+  mutate(
+      Category = "Completed the study per protocol",
+      pct = (n_completed / n_rand) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n_completed, pct), 
+  ) %>%
+  select(Category, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)" 
+  ) %>%
+  mutate(across(everything(), as.character))
+
+discontinuaton_set_data <- DS %>%
+  filter(DSCAT == "DISPOSITION EVENT" & DSDECOD != "COMPLETED") %>%
+    inner_join(
+    DM %>% select(USUBJID, ACTARMCD), 
+    by = "USUBJID"
+  ) %>%
+  group_by(DSDECOD, ACTARMCD) %>%
+  summarise(
+    n_event = n(), 
+    .groups = "drop"
+  ) %>%
+  left_join(randomised_patients, by = "ACTARMCD") %>%
+  mutate(
+    pct = (n_event / n_rand) * 100,
+    Category = "Early discontinuation",
+    cell_Value = sprintf("%d (%.2f%%)", n_event, pct),
+    Label = case_when(
+      DSDECOD == "ADVERSE EVENT" ~ "Adverse event",
+      DSDECOD == "WITHDRAWAL BY SUBJECT" ~ "Withdrawal of consent",
+      DSDECOD == "LOST TO FOLLOW-UP" ~ "Lost to follow-up",
+      DSDECOD == "DEATH" ~ "Death"
+    )
+  ) 
+
+discontinuaton_all <- discontinuaton_set_data  %>%
+  group_by(Category, ACTARMCD) %>%
+  summarise(
+    n_event = sum(n_event),
+    n_rand = max(n_rand),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct = (n_event / n_rand) * 100,
+    Category = "Early discontinuation",
+    cell_Value = sprintf("%d (%.2f%%)", n_event, pct),
+  ) %>%
+  select(Category, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)" 
+  ) %>%
+  mutate(across(everything(), as.character))
+
+discontinuaton_set <- discontinuaton_set_data %>%
+  select(Category, Label, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)" 
+  ) %>%
+  mutate(across(everything(), as.character))
+```
+
+```{r Disposition_rtf}
+Disposition_data_frame <- bind_rows(count_screened, 
+            count_screen_failure, 
+            randomised_patients_wider, 
+            safety_set, 
+            full_set, 
+            protocol_set, 
+            completed_set, 
+            discontinuaton_all,
+            discontinuaton_set
+  ) %>%
+  select(Category, Label, PLCB, SD1, SD2) %>%  #Вместо PLCB, SD1, SD2 должны быть выбраны переменные, содержащие информацию о препарате, из колонки ACTARMCD
+  rename(
+   `Placebo` = "PLCB" ,
+   `STUDY_DRUG dose 1` = "SD1",
+   `STUDY_DRUG dose 2` = "SD2"
+  ) 
+
+Disposition_table <- create_table(Disposition_data_frame,
+                                  borders = c("top", "bottom"),
+                                  header_bold = TRUE) %>%
+  titles("Disposition (All Patients)", bold = TRUE) %>%
+  stub(vars = c("Category", "Label"), label = "") %>%
+  define(Label, indent = .3) %>% 
+  define(Placebo, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 1`, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 2`, align = "right", label_align = "center") %>%
+  footnotes("* All further percentages will be calculated relative these frequencies")
+
+Disposition_rtf <- create_report("output/Disposition_table.rtf", output_type = "RTF") %>%
+  add_content(Disposition_table) 
+
+write_report(Disposition_rtf)
+```
+
+# Создание таблицы с демографическими данными пациентов в исследовании 
+
+```{r Demographics_table_df_preparation}
+#Построение датафрейма, содержащего статистики для возраста
+anova_age <- aov(AGE ~ ACTARMCD, data = DM)
+p_value_age <- sprintf("%.3f", summary(anova_age)[[1]][["Pr(>F)"]][1]) 
+
+age <- DM %>%
+  select(AGE, ACTARMCD) %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "Age (years)",
+    N = as.character(n()),
+    `Mean (SD)` = sprintf("%.2f (%.2f)", mean(AGE), sd(AGE)),
+    Median = sprintf("%.2f", median(AGE)),
+    `Q1; Q3` = sprintf("%.2f; %.2f", 
+                    quantile(AGE, probs = 0.25),
+                    quantile(AGE, probs = 0.75)
+            ),
+    `Min; Max` = sprintf("%.2f; %.2f", min(AGE), max(AGE))
+  ) %>%
+  pivot_longer(
+    cols = c(N, `Mean (SD)`, Median, `Q1; Q3`, `Min; Max`), 
+    names_to = "Statistics", 
+    values_to = "Value"
+  ) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = Value
+  )  %>%
+  add_row(Category = "Age (years)",
+          Statistics = paste0("p-value (ANOVA μ1=μ2=μ3)= ", p_value_age))
+
+#Построение датафрейма, содержащего статистики для пола
+p_value_sex <- sprintf("%.3f", fisher.test(table(DM$ACTARMCD, DM$SEX))$p.value) 
+
+sex <- DM %>%
+  select(SEX, ACTARMCD) %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  mutate(total_N = n()) %>%
+  group_by(SEX, ACTARMCD, total_N) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+      Category = "Sex",
+      pct = (n / total_N) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n, pct), 
+  ) %>%
+  mutate(Statistics = case_when(
+      SEX == "F" ~ "Female",
+      SEX == "M" ~ "Male"
+  )) %>%
+  select(Category, Statistics, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD,
+    values_from = cell_Value
+  )  %>%
+  add_row(Category = "Sex",
+          Statistics = paste0("p-value (Fisher’s) = ", p_value_sex))
+
+#Построение датафрейма, содержащего статистики для этнической принадлежности
+p_value_race <- sprintf("%.3f", fisher.test(table(DM$ACTARMCD, DM$RACE))$p.value) 
+
+race <- DM %>%
+  select(RACE, ACTARMCD) %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  mutate(total_N = n()) %>%
+  group_by(RACE, ACTARMCD, total_N) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+      Category = "Race",
+      pct = (n / total_N) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n, pct), 
+  ) %>%
+  mutate(Statistics = case_when(
+      RACE == "WHITE" ~ "White",
+      RACE == "ASIAN" ~ "Asian",
+      RACE == "BLACK OR AFRICAN AMERICAN" ~ "Black or African American",
+      RACE == "OTHER" ~ "Other"
+  )) %>%
+  select(Category, Statistics, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD,
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)"
+  ) %>%
+  add_row(Category = "Race",
+          Statistics = paste0("p-value (Fisher’s) = ", p_value_race))
+```
+
+```{r Demographics_rtf}
+Demographics_df <- bind_rows(age, 
+            sex, 
+            race
+  ) %>%
+  select(Category, Statistics, PLCB, SD1, SD2) %>% #Вместо PLCB, SD1, SD2 должны быть выбраны переменные, содержащие информацию о препарате, из колонки ACTARMCD
+  rename(
+   `Placebo` = "PLCB" ,
+   `STUDY_DRUG dose 1` = "SD1",
+   `STUDY_DRUG dose 2` = "SD2"
+  ) 
+
+Demographics_table <- create_table(Demographics_df, borders = c("top", "bottom"),
+                                   width = 18,
+                                   header_bold = TRUE) %>%
+  titles("Demographics (All Patients)", bold = TRUE) %>%
+  stub(vars = c("Category", "Statistics"), 
+       label = "",
+       style = cell_style(bold = TRUE, indicator = "labelrow"))  %>% 
+  define(Category, label_row = TRUE) %>%  
+  define(Statistics, indent = .3) %>% 
+  define(Placebo, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 1`, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 2`, align = "right", label_align = "center") 
+
+
+Demographics_rtf <- create_report("output/Demographics_table.rtf", output_type = "RTF", units = "cm") %>%
+  add_content(Demographics_table) 
+
+write_report(Demographics_rtf)
+```
+
+#Создание таблицы с суммированием симптомов, соответстующих назначению лекарства и временем между развитием симптома и получением лекарства
+
+```{r Symptoms_Day_1_df_preparation}
+#Маска для того, чтобы выбрать популяцию Full Analysis Set
+full_set_mask <- EX %>%
+  filter(EPOCH == "TREATMENT") %>% 
+  select(USUBJID) %>%
+  distinct(USUBJID) %>%
+  inner_join(LB, by = "USUBJID") %>% 
+  filter(LBTESTCD == "lab_param_1" & EPOCH == "FOLLOW-UP") %>% 
+  inner_join(
+    full_set_screening %>% 
+    select(USUBJID), 
+    by = "USUBJID") %>%
+  distinct(USUBJID)
+
+#Проверяем, сколько субъектов, попавших в исследование, имели зарегестрированный симптом. 
+
+chest_pain_not_diagnosed <- FA %>%
+  select(USUBJID, FATEST) %>%
+  filter(FATEST == "НАЗВАНИЕ СИМПТОМА") %>%
+  right_join(DM, by = "USUBJID") %>%
+  select(USUBJID, FATEST) %>%
+  summarise(
+    n = is.null(USUBJID))
+
+#Поскольку после объединения не появилось субъектов, у которых в колонке USUBJID появился NULL, то можно сделать вывод, что все субъекты, включенные в исследование имели зарегестрированный симптом.
+
+symptom_count <- FA %>%
+  select(USUBJID, FATEST) %>%
+  filter(FATEST == "НАЗВАНИЕ СИМПТОМА") %>%
+  inner_join(DM, by = "USUBJID") %>%
+  inner_join(full_set_mask, by = "USUBJID") %>%
+  select(USUBJID, FATEST, ACTARMCD) %>%
+  mutate(total_N = n()) %>%
+  group_by(ACTARMCD, total_N) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+      Category = "ВЫЯВЛЕННЫЙ СИМПТОМ",
+      pct = (n / total_N) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n, pct), 
+  )  %>%
+  mutate(Statistics = "Yes") %>%
+  select(Category, Statistics, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD,
+    values_from = cell_Value
+  ) 
+
+#Добавление колонки с временем до введения лекарства
+admin_time <- FA %>%
+  select(USUBJID, FATEST, FADTC) %>%
+  filter(FATEST == "НАЗВАНИЕ СИМПТОМА") %>%
+  inner_join(DM, by = "USUBJID") %>% 
+  inner_join(full_set_mask, by = "USUBJID") %>%
+  select(USUBJID, FATEST, FADTC, ACTARMCD) %>%  
+  inner_join(EX, by = "USUBJID") %>%
+  group_by(USUBJID) %>%
+  arrange(EXENDTC) %>% #из двух времен инъекции, выбираем самое раннее, чтобы посчитать время между началом симптома и ввеением лекарства
+  slice(1) %>%
+  ungroup() %>%
+  select(USUBJID, ACTARMCD, FATEST, FADTC, EXENDTC) %>%
+  mutate(FADTC = as.POSIXct(FADTC, format = "%Y-%m-%dT%H:%M"),
+         EXENDTC = as.POSIXct(EXENDTC, format = "%Y-%m-%dT%H:%M"),
+         admin_time_h = as.double(EXENDTC - FADTC))
+
+#Подсчет статистик по времени 
+anova_time <- aov(admin_time_h ~ ACTARMCD, data = admin_time)
+p_value_time <- sprintf("%.3f", summary(anova_time)[[1]][["Pr(>F)"]][1])
+
+admin_time_statistics <- admin_time %>%
+  select(admin_time_h, ACTARMCD) %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "ВРЕМЯ ОТ РЕГИСТРАЦИИ СИМПТОММА ДО ВВЕДЕНИЯ ЛЕКАРСТВА (ЧАСЫ)",
+    N = as.character(n()),
+    `Mean (SD)` = sprintf("%.2f (%.2f)", mean(admin_time_h), sd(admin_time_h)),
+    Median = sprintf("%.2f", median(admin_time_h)),
+    `Q1; Q3` = sprintf("%.2f; %.2f", 
+                    quantile(admin_time_h, probs = 0.25),
+                    quantile(admin_time_h, probs = 0.75)
+            ),
+    `Min; Max` = sprintf("%.2f; %.2f", min(admin_time_h), max(admin_time_h))
+  ) %>%
+  pivot_longer(
+    cols = c(N, `Mean (SD)`, Median, `Q1; Q3`, `Min; Max`), 
+    names_to = "Statistics", 
+    values_to = "Value"
+  ) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = Value
+  ) %>%
+  add_row(Category = "ВРЕМЯ ОТ РЕГИСТРАЦИИ СИМПТОММА ДО ВВЕДЕНИЯ ЛЕКАРСТВА (ЧАСЫ)",
+          Statistics = paste0("p-value (ANOVA μ1=μ2=μ3)= ", p_value_time))
+```
+
+```{r Symptoms_Day_1_rtf}
+Symptoms_df <- bind_rows(symptom_count, admin_time_statistics) %>%
+  select(Category, Statistics, PLCB, SD1, SD2) %>% #Вместо PLCB, SD1, SD2 должны быть выбраны переменные, содержащие информацию о препарате, из колонки ACTARMCD
+  rename(
+   `Placebo` = "PLCB" ,
+   `STUDY_DRUG dose 1` = "SD1",
+   `STUDY_DRUG dose 2` = "SD2"
+  )
+
+Symptoms_table <- create_table(Symptoms_df,
+                               borders = c("top", "bottom"),
+                               header_bold = TRUE) %>%
+  titles("Symptoms. Day 1 (Full Analysis Set))",
+         bold = TRUE) %>%
+  stub(vars = c("Category", "Statistics"), 
+       label = "Parameter\n Statistics",
+       style = cell_style(bold = TRUE, indicator = "labelrow"))  %>% 
+  define("Category", label_row = TRUE) %>% 
+  define("Statistics", indent = .3) %>% 
+  define(Placebo, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 1`, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 2`, align = "right", label_align = "center")
+
+Symptoms_rtf <- create_report("output/Symptoms_table.rtf", output_type = "RTF") %>%
+  add_content(Symptoms_table) 
+
+write_report(Symptoms_rtf)
+```
+
+#Создание таблицы, содержащей анамнез субъектов
+
+```{r Medical_history_table_df_preparation}
+#Маска для того, чтобы выбрать популяцию Full Analysis Set
+full_set_mask <- EX %>%
+  filter(EPOCH == "TREATMENT") %>% #выбираем всех, кто ПОЛУЧИЛ лечение
+  select(USUBJID) %>%
+  distinct(USUBJID) %>%
+  inner_join(LB, by = "USUBJID") %>% 
+  filter(LBTESTCD == "lab_param_1" & EPOCH == "FOLLOW-UP") %>% 
+  inner_join(
+    full_set_screening %>% 
+    select(USUBJID), 
+    by = "USUBJID") %>%
+  distinct(USUBJID)
+
+total_patients <- MH %>%
+  select(USUBJID) %>%
+  inner_join(full_set_mask, by = "USUBJID") %>%
+  inner_join(DM, by = "USUBJID") %>%
+  distinct(USUBJID, ACTARMCD) %>%
+  mutate(total_N = n()) %>%
+  group_by(ACTARMCD, total_N) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+      Category = "Total patients",
+      pct = (n / total_N) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n, pct), 
+  ) %>%
+  rename(
+    `SOC term` = Category
+  ) %>%
+  select(`SOC term`, ACTARMCD, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD,
+    values_from = cell_Value
+  ) 
+
+soc_term <- MH %>%
+  select(USUBJID, MHBODSYS) %>%
+  inner_join(full_set_mask, by = "USUBJID") %>%
+  distinct(USUBJID, MHBODSYS) %>%
+  inner_join(DM, by = "USUBJID")  %>%
+  group_by(MHBODSYS) %>%
+  mutate(total_N = n()) %>%
+  group_by(ACTARMCD, MHBODSYS, total_N) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+      Category = "SOC term",
+      pct = (n / total_N) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n, pct), 
+  ) %>%
+  rename(
+    `SOC term` = MHBODSYS
+  ) %>%
+  select(ACTARMCD, `SOC term`, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)"
+  ) 
+
+soc_term_preferred <- MH %>% 
+  select(USUBJID, MHBODSYS, MHDECOD) %>%
+  inner_join(full_set_mask, by = "USUBJID") %>%
+  distinct(USUBJID, MHBODSYS, MHDECOD) %>%
+  inner_join(DM, by = "USUBJID")  %>%
+  group_by(MHBODSYS, MHDECOD) %>%
+  mutate(total_N = n()) %>%
+  group_by(ACTARMCD, MHBODSYS, MHDECOD, total_N) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+      pct = (n / total_N) * 100, ,
+      cell_Value = sprintf("%d (%.2f%%)", n, pct), 
+  ) %>%
+  rename(
+    `SOC term` = MHBODSYS,
+    `Preferred term` = MHDECOD
+  ) %>%
+  select(ACTARMCD, `SOC term`,`Preferred term`, cell_Value) %>%
+  pivot_wider(
+    names_from = ACTARMCD,
+    values_from = cell_Value,
+    values_fill = "0 (0.00%)"
+  ) 
+```
+
+```{r Medical_history_rtf}
+soc_sorted <- bind_rows(soc_term, 
+                        soc_term_preferred
+  ) %>%
+  arrange(`SOC term`) #Чтобы упорядочить soc с терминами внутри него
+
+Medical_history_data_frame <- bind_rows(total_patients, #Выводим Total patients наверх
+                                        soc_sorted
+  ) %>% 
+  add_row(
+    `SOC term` = " ",        
+    `Preferred term` = NA,   
+    .after = 1   #Добавляем пустую строку после Total patients            
+  ) %>% 
+  select(`SOC term`, `Preferred term`, PLCB, SD1, SD2) %>% #Вместо PLCB, SD1, SD2 должны быть выбраны переменные, содержащие информацию о препарате, из колонки ACTARMCD
+  rename(
+   `Placebo` = "PLCB" ,
+   `STUDY_DRUG dose 1` = "SD1",
+   `STUDY_DRUG dose 2` = "SD2"
+  )
+
+Medical_history_table <- create_table(Medical_history_data_frame,
+                                      borders = c("top", "bottom"),
+                                      header_bold = TRUE) %>%
+  titles("Medical history. Day 1 (Full Analysis Set))",
+         bold = TRUE) %>%
+  stub(vars = c("SOC term", "Preferred term"), 
+       label = "System Organ Class term\n Preferred term")  %>% 
+  define("Preferred term", indent = .3) %>% 
+  define(Placebo, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 1`, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 2`, align = "right", label_align = "center")
+
+Medical_history_rtf <- create_report("output/Medical_history_table.rtf", output_type = "RTF", units = "cm") %>%
+  add_content(Medical_history_table) 
+
+write_report(Medical_history_rtf)
+```
+
+#Создание таблицы, содержащей исходные значения исследуемых показателей 
+
+```{r baseline_Day_1_df_preparation}
+#Создаем промежуточную таблицу, из которой будем брать переменные для заполнения целевой таблицы 
+lab_param_1_2_3 <- LB %>%
+  select(USUBJID, LBTESTCD, EPOCH, LBSTRESN, VISIT, LBDTC) %>%
+  filter(LBTESTCD %in% c("lab_param_1", "lab_param_2", "lab_param_3"), #заполнить нужными аббревитаурами лабораторных параметров
+         VISIT == "Visit 1 (Day 1)",
+         EPOCH %in% c("SCREENING", "TREATMENT")) %>%
+  inner_join(DM %>% select(USUBJID, ACTARMCD), 
+             by = "USUBJID")
+
+#Построение датафрейма, содержащего статистики для lab_param_1
+anova_lab_param_1 <- aov(LBSTRESN ~ ACTARMCD, 
+                 data = lab_param_1_2_3 %>% filter(LBTESTCD == "lab_param_1"))
+p_value_lab_param_1 <- sprintf("%.3f", summary(anova_lab_param_1)[[1]][["Pr(>F)"]][1]) 
+
+lab_param_1_baseline <- lab_param_1_2_3 %>%
+  select(USUBJID, LBTESTCD, LBSTRESN, ACTARMCD) %>%
+  filter(LBTESTCD == "lab_param_1" & !is.na(LBSTRESN)) %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "lab_param_1 (mg/L)",
+    N = as.character(n()),
+    `Mean (SD)` = sprintf("%.2f (%.2f)", mean(LBSTRESN), sd(LBSTRESN)),
+    Median = sprintf("%.2f", median(LBSTRESN)),
+    `Q1; Q3` = sprintf("%.2f; %.2f", 
+                    quantile(LBSTRESN, probs = 0.25),
+                    quantile(LBSTRESN, probs = 0.75)
+            ),
+    `Min; Max` = sprintf("%.2f; %.2f", min(LBSTRESN), max(LBSTRESN))
+  ) %>%
+  pivot_longer(
+    cols = c(N, `Mean (SD)`, Median, `Q1; Q3`, `Min; Max`), 
+    names_to = "Statistics", 
+    values_to = "Value"
+  ) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = Value
+  ) %>%
+  add_row(Category = "lab_param_1 (mg/L)",
+          Statistics = paste0("p-value (ANOVA μ1=μ2=μ3)= ", p_value_lab_param_1))
+
+#Построение датафрейма, содержащего статистики для lab_param_2
+anova_lab_param_2<- aov(LBSTRESN ~ ACTARMCD, 
+                 data = lab_param_1_2_3 %>% filter(LBTESTCD == "lab_param_2"))
+p_value_lab_param_2 <- sprintf("%.3f", summary(anova_lab_param_2)[[1]][["Pr(>F)"]][1]) 
+
+lab_param_2_baseline <- lab_param_1_2_3 %>%
+  select(USUBJID, LBTESTCD, LBSTRESN, ACTARMCD) %>%
+  filter(LBTESTCD == "lab_param_2" & !is.na(LBSTRESN)) %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "lab_param_2 (ng/mL)",
+    N = as.character(n()),
+    `Mean (SD)` = sprintf("%.2f (%.2f)", mean(LBSTRESN), sd(LBSTRESN)),
+    Median = sprintf("%.2f", median(LBSTRESN)),
+    `Q1; Q3` = sprintf("%.2f; %.2f", 
+                    quantile(LBSTRESN, probs = 0.25),
+                    quantile(LBSTRESN, probs = 0.75)
+            ),
+    `Min; Max` = sprintf("%.2f; %.2f", min(LBSTRESN), max(LBSTRESN))
+  ) %>%
+  pivot_longer(
+    cols = c(N, `Mean (SD)`, Median, `Q1; Q3`, `Min; Max`), 
+    names_to = "Statistics", 
+    values_to = "Value"
+  ) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = Value
+  ) %>%
+  add_row(Category = "lab_param_2 (ng/mL)",
+          Statistics = paste0("p-value (ANOVA μ1=μ2=μ3)= ", p_value_lab_param_2))
+
+#Построение датафрейма, содержащего статистики для lab_param_3
+anova_lab_param_3 <- aov(LBSTRESN ~ ACTARMCD, 
+                 data = lab_param_1_2_3 %>% filter(LBTESTCD == "lab_param_3"))
+p_value_lab_param_3 <- sprintf("%.3f", summary(anova_lab_param_3)[[1]][["Pr(>F)"]][1]) 
+
+lab_param_3_baseline <- lab_param_1_2_3%>%
+  select(USUBJID, LBTESTCD, LBSTRESN, ACTARMCD) %>%
+  filter(LBTESTCD == "lab_param_3" & !is.na(LBSTRESN)) %>%
+  mutate(ACTARMCD = factor(ACTARMCD)) %>%
+  group_by(ACTARMCD) %>%
+  summarise(
+    Category = "lab_param_3 (ng/mL)",
+    N = as.character(n()),
+    `Mean (SD)` = sprintf("%.2f (%.2f)", mean(LBSTRESN), sd(LBSTRESN)),
+    Median = sprintf("%.2f", median(LBSTRESN)),
+    `Q1; Q3` = sprintf("%.2f; %.2f", 
+                    quantile(LBSTRESN, probs = 0.25),
+                    quantile(LBSTRESN, probs = 0.75)
+            ),
+    `Min; Max` = sprintf("%.2f; %.2f", min(LBSTRESN), max(LBSTRESN))
+  ) %>%
+  pivot_longer(
+    cols = c(N, `Mean (SD)`, Median, `Q1; Q3`, `Min; Max`), 
+    names_to = "Statistics", 
+    values_to = "Value"
+  ) %>%
+  pivot_wider(
+    names_from = ACTARMCD, 
+    values_from = Value
+  ) %>%
+  add_row(Category = "lab_param_3 (ng/mL)",
+          Statistics = paste0("p-value (ANOVA μ1=μ2=μ3)= ", p_value_lab_param_3))
+```
+
+```{r baseline_Day_1_rtf}
+baseline_df <- bind_rows(lab_param_1_baseline,
+                         lab_param_2_baseline,
+                         lab_param_3_baseline
+  ) %>%
+  select(Category, Statistics, PLCB, SD1, SD2) %>% #Вместо PLCB, SD1, SD2 должны быть выбраны переменные, содержащие информацию о препарате, из колонки ACTARMCD
+  rename(
+   `Placebo` = "PLCB" ,
+   `STUDY_DRUG dose 1` = "SD1",
+   `STUDY_DRUG dose 2` = "SD2"
+  )
+
+baseline_table <- create_table(baseline_df,
+                               borders = c("top", "bottom"),
+                               width = 18,
+                               header_bold = TRUE) %>%
+  titles("Baseline. Day 1 (Full Analysis Set)") %>%
+  stub(vars = c("Category", "Statistics"),
+       label = "Parameter\n Statistics",
+       style = cell_style(bold = TRUE, indicator = "labelrow"))  %>% 
+  define(Category, label_row = TRUE) %>%  
+  define("Statistics", indent = .3) %>% 
+  define(Placebo, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 1`, align = "right", label_align = "center") %>%
+  define( `STUDY_DRUG dose 2`, align = "right", label_align = "center")
+
+baseline_rtf <- create_report("output/baseline_table.rtf", output_type = "RTF", units = "cm") %>%
+  add_content(baseline_table) 
+
+write_report(baseline_rtf)
+```
+
+```{r rtf_set}
+final_report <- create_report("completed_task.docx", 
+                           output_type = "DOCX",
+                           orientation = "landscape",
+                           units = "cm") %>% 
+  set_margins(top = 2, bottom = 2, left = 3, right = 3) %>% 
+  page_header("Statistical Analysis Plan") %>%
+  page_footer(center = "Page [pg] of [tpg]") %>% 
+  add_content(Disposition_table, page_break = TRUE) %>% 
+  add_content(Demographics_table, page_break = TRUE) %>% 
+  add_content(Symptoms_table, page_break = TRUE) %>% 
+  add_content(Medical_history_table, page_break = TRUE) %>% 
+  add_content(baseline_table, page_break = FALSE)   
+
+write_report(final_report)
+```
+  
+  
